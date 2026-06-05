@@ -1,20 +1,16 @@
 // pr0Vault — Service Worker (Background)
 // Handles all messages, DB operations, search, and export.
 
-import { db } from "./shared/db";
+import {db} from "./shared/db";
 import Fuse from "fuse.js";
-import { logSync, logErr } from "./shared/logger";
-import type {
-  VaultMessage,
-  VaultResponse,
-  SyncProgressMessage,
-  SyncCompleteMessage,
-} from "./shared/messages";
-import type { VaultStats, Comment, Message, ExportData } from "./shared/types";
+import {logErr, logSync} from "./shared/logger";
+import {browser} from "./shared/browser";
+import type {SyncCompleteMessage, SyncProgressMessage, VaultMessage,} from "./shared/messages";
+import type {Comment, ExportData, Message, VaultStats} from "./shared/types";
 
 // ---- Alarm Handler (Auto-Sync) ----
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+browser.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "pr0vault-sync") {
     logSync("SW", "Auto-Sync triggered");
     handleSyncStart("all").catch((e) => logErr("SW", `Auto-Sync error: ${String(e)}`));
@@ -23,43 +19,35 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Message Router ----
 
-chrome.runtime.onMessage.addListener(
-  (msg: VaultMessage, _sender, sendResponse: (r: VaultResponse) => void) => {
-    switch (msg.type) {
+browser.runtime.onMessage.addListener(
+  (msg: any, _sender: any): any => {
+    const vaultMsg = msg as VaultMessage;
+    switch (vaultMsg.type) {
       case "STORE_BATCH":
-        handleStoreBatch(msg.payload);
-        sendResponse({ success: true });
-        break;
+        handleStoreBatch(vaultMsg.payload);
+        return Promise.resolve({ success: true });
 
       case "SYNC_START":
-        logSync("SW", `Sync gestartet: ${msg.scope}`);
-        handleSyncStart(msg.scope).then((stats) => {
+        logSync("SW", `Sync gestartet: ${vaultMsg.scope}`);
+        return handleSyncStart(vaultMsg.scope).then((stats) => {
           logSync("SW", `Sync fertig: ${JSON.stringify(stats)}`);
-          sendResponse(stats);
+          return stats;
         }).catch(e => {
           logErr("SW", `Sync Fehler: ${String(e)}`);
-          sendResponse({ success: false, error: String(e) });
+          return { success: false, error: String(e) };
         });
-        break;
 
       case "QUERY_SEARCH":
-        handleSearch(msg.query, msg.limit ?? 50).then((results) =>
-          sendResponse({ results })
+        return handleSearch(vaultMsg.query, vaultMsg.limit ?? 50).then((results) =>
+          ({ results })
         );
-        break;
 
       case "GET_STATS":
-        getStats().then((stats) => sendResponse(stats));
-        break;
+        return getStats();
 
       case "EXPORT":
-        handleExport(msg.format, msg.scope).then((result) =>
-          sendResponse(result)
-        );
-        break;
+        return handleExport(vaultMsg.format, vaultMsg.scope);
     }
-
-    return true; // Keep channel open for async
   }
 );
 
@@ -106,13 +94,13 @@ async function sendSyncProgress(
     newItems,
   };
   // Broadcast to popup via runtime
-  chrome.runtime.sendMessage(msg).catch(() => {});
+  browser.runtime.sendMessage(msg).catch(() => {});
 }
 
 async function getPr0Cookies(): Promise<string> {
   const [pp, me] = await Promise.all([
-    chrome.cookies.get({ url: "https://pr0gramm.com", name: "pp" }),
-    chrome.cookies.get({ url: "https://pr0gramm.com", name: "me" }),
+    browser.cookies.get({ url: "https://pr0gramm.com", name: "pp" }),
+    browser.cookies.get({ url: "https://pr0gramm.com", name: "me" }),
   ]);
   if (!pp || !me) throw new Error("Nicht eingeloggt — bitte pr0gramm.com besuchen.");
   return `pp=${pp.value}; me=${me.value}`;
@@ -120,7 +108,7 @@ async function getPr0Cookies(): Promise<string> {
 
 async function getUsername(): Promise<string> {
   try {
-    const meCookie = await chrome.cookies.get({ url: "https://pr0gramm.com", name: "me" });
+    const meCookie = await browser.cookies.get({ url: "https://pr0gramm.com", name: "me" });
     if (meCookie) {
       const decoded = JSON.parse(decodeURIComponent(meCookie.value));
       return decoded.n || "";
@@ -149,15 +137,10 @@ async function fetchAPI(
   }
 
   // Fallback: use content script on active pr0gramm tab
-  const tabs = await chrome.tabs.query({ url: "https://pr0gramm.com/*" });
+  const tabs = await browser.tabs.query({ url: "https://pr0gramm.com/*" });
   const tab = tabs[0];
   if (tab?.id) {
-    return new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tab.id!, { type: "FETCH_API", endpoint, params }, (resp) => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve(resp);
-      });
-    });
+    return browser.tabs.sendMessage(tab.id, { type: "FETCH_API", endpoint, params });
   }
 
   throw new Error("Kein pr0gramm-Tab aktiv und kein Cookie verfügbar.");
@@ -344,7 +327,7 @@ async function syncInbox(me: string) {
 
 async function handleSyncStart(scope: string): Promise<VaultStats> {
   // Get username from cookie
-  const meCookie = await chrome.cookies.get({
+  const meCookie = await browser.cookies.get({
     url: "https://pr0gramm.com",
     name: "me",
   });
@@ -370,7 +353,7 @@ async function handleSyncStart(scope: string): Promise<VaultStats> {
 
   const stats = await getStats();
   const complete: SyncCompleteMessage = { type: "SYNC_COMPLETE", stats };
-  chrome.runtime.sendMessage(complete).catch(() => {});
+  browser.runtime.sendMessage(complete).catch(() => {});
 
   return stats;
 }
@@ -452,7 +435,7 @@ async function handleExport(
       });
       const url = URL.createObjectURL(blob);
 
-      await chrome.downloads.download({
+      await browser.downloads.download({
         url,
         filename: `pr0vault-export-${dateStr}.json`,
         saveAs: true,
@@ -484,7 +467,7 @@ async function handleExport(
       const zipBlob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(zipBlob);
 
-      await chrome.downloads.download({
+      await browser.downloads.download({
         url,
         filename: `pr0vault-export-${dateStr}.zip`,
         saveAs: true,

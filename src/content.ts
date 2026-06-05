@@ -1,9 +1,10 @@
 // pr0Vault — Content Script (injected on pr0gramm.com)
 // Intercepts fetch/XHR API responses and mirrors them to IndexedDB via Service Worker.
 
-import type { Upload, Comment, Message, FilterBookmark } from "./shared/types";
-import type { StoreBatchMessage } from "./shared/messages";
-import { logSync, logErr } from "./shared/logger";
+import type {Comment, FilterBookmark, Message, Upload} from "./shared/types";
+import type {StoreBatchMessage} from "./shared/messages";
+import {logErr, logSync} from "./shared/logger";
+import {browser} from "./shared/browser";
 
 interface PendingBatch {
   uploads?: Upload[];
@@ -23,7 +24,7 @@ function flush() {
     };
     // Send synchronously to ensure data is not lost
     try {
-      chrome.runtime.sendMessage(msg);
+      browser.runtime.sendMessage(msg);
     } catch {
       // silent
     }
@@ -152,7 +153,7 @@ window.fetch = async function pr0VaultFetch(
 
 // ---- Active Sync Proxy ----
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+browser.runtime.onMessage.addListener((msg: any) => {
   if (msg.type === "FETCH_API") {
     const { endpoint, params } = msg;
     const url = new URL(`/api${endpoint}`, window.location.origin);
@@ -162,11 +163,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       });
     }
 
-    fetch(url.toString(), { credentials: "include" })
+    return fetch(url.toString(), { credentials: "include" })
       .then((r) => r.json())
-      .then(sendResponse)
-      .catch((err) => sendResponse({ error: String(err) }));
-
-    return true; // Keep message channel open for async response
+      .catch((err) => ({ error: String(err) }));
   }
 });
