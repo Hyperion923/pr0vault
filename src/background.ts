@@ -164,137 +164,182 @@ async function fetchAPI(
 }
 
 async function syncComments(me: string, fromPopup: boolean) {
-  let before = Math.floor(Date.now() / 1000);
-  let page = 0;
+  // Inkrementell: nur neuere als den letzten bekannten Kommentar holen
+  const lastMeta = await db.meta.get("lastCommentTs");
+  const lastTs = (lastMeta?.value as number) || 0;
+  const isIncremental = lastTs > 0;
+
+  let after = isIncremental ? lastTs : 0;
   let totalNew = 0;
+  let page = 0;
 
   while (true) {
-    const params: Record<string, string> = { name: me, flags: "15", before: String(before) };
+    const params: Record<string, string> = { name: me, flags: "15" };
+    if (after > 0) {
+      params.after = String(after);
+    } else {
+      // Initial-Sync: starte bei neuesten, paginiere rückwärts mit before
+      params.before = String(Math.floor(Date.now() / 1000));
+    }
 
-    const data = (await fetchAPI("/profile/comments", params)) as Record<
-      string,
-      unknown
-    > | null;
+    const data = (await fetchAPI("/profile/comments", params)) as Record<string, unknown> | null;
     if (!data || data.error) break;
 
     const comments = data.comments as Comment[] | undefined;
     if (!comments || comments.length === 0) break;
 
-    const now = Date.now();
-    await db.comments.bulkPut(comments);
-    await db.meta.put({ key: "lastSync", value: now });
-    totalNew += comments.length;
+    // Bei Incremental-Sync: early stop wenn alle IDs schon bekannt
+    if (isIncremental) {
+      const knownIds = new Set(
+        (await db.comments.where("id").anyOf(comments.map(c => c.id)).toArray()).map(c => c.id)
+      );
+      const newComments = comments.filter(c => !knownIds.has(c.id));
+      if (newComments.length === 0 && knownIds.size > 0) break;
+
+      await db.comments.bulkPut(newComments);
+      await db.meta.put({ key: "lastSync", value: Date.now() });
+      totalNew += newComments.length;
+    } else {
+      // Initial backfill: alle speichern
+      await db.comments.bulkPut(comments);
+      await db.meta.put({ key: "lastSync", value: Date.now() });
+      totalNew += comments.length;
+    }
     page++;
 
-    if (fromPopup) {
-      sendSyncProgress("comments", page, 0, totalNew);
+    // Track newest timestamp
+    const maxTs = Math.max(...comments.map(c => c.created));
+    await db.meta.put({ key: "lastCommentTs", value: maxTs });
+
+    if (fromPopup) sendSyncProgress("comments", page, 0, totalNew);
+
+    if (isIncremental) {
+      if (!data.hasNewer) break;
+      after = Math.max(...comments.map(c => c.created));
+    } else {
+      if (!data.hasOlder) break;
+      after = 0; // switch to before-based for next pages
     }
 
-    if (!data.hasOlder) break;
+    if (!isIncremental) {
+      if (!data.hasOlder) break;
+      // Use oldest comment's timestamp for next before-based page
+      params.before = String(comments[comments.length - 1].created);
+      // Drop after, use before only
+    }
 
-    // Use the oldest comment's timestamp for next page
-    const oldest = comments[comments.length - 1];
-    before = oldest.created;
+    // Throttle
+    await new Promise(r => setTimeout(r, 300));
   }
 
+  logSync("SW", `Synced ${totalNew} comments (incremental: ${isIncremental})`);
   return totalNew;
 }
 
 async function syncUploads(me: string, fromPopup: boolean) {
-  let older: number | undefined;
-  let page = 0;
+  const lastMeta = await db.meta.get("lastUploadId");
+  const lastId = (lastMeta?.value as number) || 0;
+  const isIncremental = lastId > 0;
+
+  let newer: number | undefined = isIncremental ? lastId : undefined;
+  let older: number | undefined = isIncremental ? undefined : undefined;
   let totalNew = 0;
+  let page = 0;
 
   while (true) {
-    const params: Record<string, string> = {
-      user: me,
-      flags: "15",
-    };
+    const params: Record<string, string> = { user: me, flags: "15" };
+    if (newer !== undefined) params.newer = String(newer);
     if (older !== undefined) params.older = String(older);
 
-    const data = (await fetchAPI("/items/get", params)) as Record<
-      string,
-      unknown
-    > | null;
+    const data = (await fetchAPI("/items/get", params)) as Record<string, unknown> | null;
     if (!data || data.error) break;
 
     const items = data.items as import("./shared/types").Upload[] | undefined;
     if (!items || items.length === 0) break;
 
+    // Early stop when all known
+    const knownIds = new Set(
+      (await db.uploads.where("id").anyOf(items.map(i => i.id)).toArray()).map(i => i.id)
+    );
+    const newItems = items.filter(i => !knownIds.has(i.id));
+
+    if (isIncremental && newItems.length === 0) break;
+
     const now = Date.now();
-    const synced = items.map((it) => ({ ...it, syncedAt: now }));
+    const synced = newItems.map((it) => ({ ...it, syncedAt: now }));
     await db.uploads.bulkPut(synced);
     await db.meta.put({ key: "lastSync", value: now });
-    totalNew += items.length;
+    totalNew += newItems.length;
     page++;
 
-    if (fromPopup) {
-      sendSyncProgress("uploads", page, 0, totalNew);
-    }
+    // Track highest ID
+    const maxId = Math.max(...items.map(i => i.id));
+    await db.meta.put({ key: "lastUploadId", value: maxId });
+
+    if (fromPopup) sendSyncProgress("uploads", page, 0, totalNew);
 
     if (data.atEnd) break;
 
-    older = items[items.length - 1].id;
+    newer = isIncremental ? Math.max(...items.map(i => i.id)) : undefined;
+    if (!isIncremental) older = items[items.length - 1].id;
+
+    await new Promise(r => setTimeout(r, 300));
   }
 
+  logSync("SW", `Synced ${totalNew} uploads (incremental: ${isIncremental})`);
   return totalNew;
 }
 
 async function syncFilters() {
   const data = (await fetchAPI("/bookmarks/get")) as Record<string, unknown> | null;
   if (!data || data.error) return 0;
-
   const bookmarks = data.bookmarks as import("./shared/types").FilterBookmark[] | undefined;
   if (!bookmarks || bookmarks.length === 0) return 0;
-
   const now = Date.now();
   const synced = bookmarks.map((b) => ({ ...b, syncedAt: now }));
   await db.filters.bulkPut(synced);
-  logSync("SW", `Stored ${synced.length} filters`);
   return synced.length;
 }
 
 async function syncCollections() {
   const data = (await fetchAPI("/collections/get")) as Record<string, unknown> | null;
   if (!data || data.error) return 0;
-
   const collections = data.collections as import("./shared/types").Collection[] | undefined;
   if (!collections || collections.length === 0) return 0;
-
   const now = Date.now();
   const synced = collections.map((c) => ({ ...c, syncedAt: now }));
   await db.collections.bulkPut(synced);
-  logSync("SW", `Stored ${synced.length} collections`);
   return synced.length;
 }
 
 async function syncInbox(me: string) {
-  let older = Math.floor(Date.now() / 1000);
-  let page = 0;
-  let totalNew = 0;
+  const lastMeta = await db.meta.get("lastInboxTs");
+  const lastTs = (lastMeta?.value as number) || 0;
 
-  while (true) {
-    const params: Record<string, string> = { older: String(older) };
+  // Nutze /inbox/pending — markiert nichts als gelesen
+  const data = (await fetchAPI("/inbox/pending")) as Record<string, unknown> | null;
+  if (!data || data.error) return 0;
 
-    const data = (await fetchAPI("/inbox/all", params)) as Record<string, unknown> | null;
-    if (!data || data.error) break;
+  const messages = data.messages as import("./shared/types").Message[] | undefined;
+  if (!messages || messages.length === 0) return 0;
 
-    const messages = data.messages as import("./shared/types").Message[] | undefined;
-    if (!messages || messages.length === 0) break;
+  // Early stop: nur neue Nachrichten seit letztem Sync
+  const newMessages = lastTs > 0
+    ? messages.filter(m => m.created > lastTs)
+    : messages;
 
-    const now = Date.now();
-    const synced = messages.map((m) => ({ ...m, syncedAt: now }));
-    await db.messages.bulkPut(synced);
-    totalNew += synced.length;
-    page++;
+  if (newMessages.length === 0) return 0;
 
-    if (data.atEnd) break;
+  const now = Date.now();
+  const synced = newMessages.map((m) => ({ ...m, syncedAt: now }));
+  await db.messages.bulkPut(synced);
 
-    older = messages[messages.length - 1].created;
-  }
+  const maxTs = Math.max(...newMessages.map(m => m.created));
+  await db.meta.put({ key: "lastInboxTs", value: maxTs });
+  await db.meta.put({ key: "lastSync", value: now });
 
-  logSync("SW", `Stored ${totalNew} inbox messages`);
-  return totalNew;
+  logSync("SW", `Stored ${synced.length} new inbox messages`);
+  return synced.length;
 }
 
 async function handleSyncStart(scope: string): Promise<VaultStats> {
