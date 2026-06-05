@@ -1,16 +1,41 @@
-// pr0Vault — Content Script (injected on pr0gramm.com)
-// Intercepts fetch/XHR API responses and mirrors them to IndexedDB via Service Worker.
+// pr0Vault — Content Script (Isolated World on pr0gramm.com)
+// Two responsibilities:
+//   1. Inject page-hook.js into the page's MAIN world so we can actually
+//      intercept pr0gramm's own fetch/XHR calls (an isolated-world override
+//      is invisible to page-context code).
+//   2. Receive page-hook postMessages, batch them, and forward to the
+//      service worker via chrome.runtime.
 
-import type {Comment, FilterBookmark, Message, Upload} from "./shared/types";
-import type {StoreBatchMessage} from "./shared/messages";
-import {logErr, logSync} from "./shared/logger";
+import type { Upload, Comment, Message, FilterBookmark, Collection, CollectionItem } from "./shared/types";
+import type { StoreBatchMessage } from "./shared/messages";
+import { logSync, logErr } from "./shared/logger";
 import {browser} from "./shared/browser";
+
+
+const HOOK_TAG = "PR0VAULT_API";
+
+// ---- Inject page hook ASAP ----
+
+(function injectPageHook() {
+  try {
+    const url = chrome.runtime.getURL("src/page-hook.js");
+    const s = document.createElement("script");
+    s.src = url;
+    s.async = false; // load synchronously so it runs before pr0gramm's bundle
+    (document.head || document.documentElement).prepend(s);
+    s.onload = () => s.remove();
+  } catch (e) {
+    logErr("CS", `inject page-hook failed: ${String(e)}`);
+  }
+})();
 
 interface PendingBatch {
   uploads?: Upload[];
   comments?: Comment[];
   messages?: Message[];
   filters?: FilterBookmark[];
+  collections?: Collection[];
+  collectionItems?: CollectionItem[];
 }
 
 let pendingBatch: PendingBatch = {};
@@ -22,11 +47,15 @@ function flush() {
       type: "STORE_BATCH",
       payload: pendingBatch,
     };
-    // Send synchronously to ensure data is not lost
     try {
-      browser.runtime.sendMessage(msg);
+
+      browser.runtime.sendMessage(msg, () => {
+        if (browser.runtime.lastError) {
+          // SW might be inactive — silent.
+        }
+      });
     } catch {
-      // silent
+      /* SW gone, ignore */
     }
     pendingBatch = {};
   }
@@ -38,12 +67,11 @@ function flush() {
 
 function enqueue(table: keyof PendingBatch, items: unknown[]) {
   if (!items || items.length === 0) return;
-
   const existing = pendingBatch[table] || [];
   (pendingBatch[table] as unknown[]) = [...existing, ...items];
-
-  // Flush immediately — no batching to avoid data loss
-  flush();
+  // Debounce 500ms so bursts (page load) coalesce.
+  if (batchTimer) clearTimeout(batchTimer);
+  batchTimer = setTimeout(flush, 500);
 }
 
 // ---- API Response Handlers ----
@@ -59,6 +87,46 @@ function handleProfileInfo(data: Record<string, unknown>) {
   const comments = data.comments as Comment[] | undefined;
   if (comments && Array.isArray(comments)) {
     enqueue("comments", comments);
+  }
+      // Store collections from profile info (includes preview items)
+      const profileCollections = data.collections as any[] | undefined;
+      if (profileCollections?.length) {
+        console.log(`[pr0Vault CS] Found ${profileCollections.length} collections in profile/info`);
+        const now = Date.now();
+    const cols: Collection[] = [];
+    const citems: CollectionItem[] = [];
+    for (const pc of profileCollections) {
+      cols.push({
+        id: pc.id,
+        name: pc.name ?? "",
+        keyword: pc.keyword ?? "",
+        isPublic: !!pc.isPublic,
+        isDefault: !!pc.isDefault,
+        isCurated: false,
+        syncedAt: now,
+      });
+      if (pc.items?.length) {
+        for (const it of pc.items) {
+          citems.push({
+            collectionId: pc.id,
+            itemId: it.id,
+            userId: 0,
+            user: "",
+            created: 0,
+            image: "",
+            thumb: it.thumb ?? "",
+            flags: it.flags ?? 0,
+            mark: 0,
+            up: 0,
+            down: 0,
+            tags: [],
+            syncedAt: now,
+          });
+        }
+      }
+    }
+    if (cols.length) enqueue("collections", cols);
+    if (citems.length) enqueue("collectionItems", citems);
   }
 }
 
@@ -109,6 +177,21 @@ function handleApiResponse(url: string, data: unknown) {
     }
     if (url.includes("/collections/get")) {
       logSync("CS", `Intercepted /collections/get`);
+      const colData = data as Record<string, unknown>;
+      const allCols = (colData.collections || colData.curatorCollections) as any[] | undefined;
+      if (allCols?.length) {
+        const now = Date.now();
+        const cols: Collection[] = allCols.map((c: any) => ({
+          id: c.id ?? 0,
+          name: c.name ?? "",
+          keyword: c.keyword ?? "",
+          isPublic: !!c.isPublic,
+          isDefault: !!c.isDefault,
+          isCurated: false,
+          syncedAt: now,
+        }));
+        enqueue("collections", cols);
+      }
     }
     if (url.includes("/inbox/")) {
       logSync("CS", `Intercepted inbox: ${url}`);
@@ -119,37 +202,14 @@ function handleApiResponse(url: string, data: unknown) {
   }
 }
 
-// ---- Fetch Interception ----
+// ---- Receive API responses from page-hook ----
 
-const originalFetch = window.fetch;
-
-window.fetch = async function pr0VaultFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
-  const response = await originalFetch(input, init);
-
-  try {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof Request
-          ? input.url
-          : input instanceof URL
-            ? input.href
-            : "";
-
-    if (url.includes("/api/")) {
-      const clone = response.clone();
-      const json = await clone.json();
-      handleApiResponse(url, json);
-    }
-  } catch {
-    // Ignore non-JSON or clone failures
-  }
-
-  return response;
-};
+window.addEventListener("message", (ev: MessageEvent) => {
+  if (ev.source !== window) return;
+  const data = ev.data;
+  if (!data || data.source !== HOOK_TAG || typeof data.url !== "string") return;
+  handleApiResponse(data.url, data.data);
+});
 
 // ---- Active Sync Proxy ----
 

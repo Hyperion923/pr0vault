@@ -1,14 +1,15 @@
 {
   "name": "pr0vault",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite build --watch",
-    "build": "tsc && vite build",
+    "dev": "vite build --watch & vite build --watch --config vite.content.config.ts & vite build --watch --config vite.page-hook.config.ts",
+    "build": "tsc && vite build && vite build --config vite.content.config.ts && vite build --config vite.page-hook.config.ts",
     "build:icons": "node scripts/build-icons.mjs",
     "prebuild": "pnpm run build:icons",
-    "predev": "pnpm run build:icons"
+    "predev": "pnpm run build:icons",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@preact/signals": "^2.1.0",

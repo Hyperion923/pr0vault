@@ -90,10 +90,14 @@ export function Dashboard({ stats, syncState, syncProgress }: Props) {
           <div class="progress-bar">
             <div class="progress-fill" />
           </div>
-          {syncProgress && (
+          {syncProgress ? (
             <p class="progress-text">
-              Synce {SCOPE_LABELS[syncProgress.scope] || syncProgress.scope}… {syncProgress.newItems} neu
+              Synce {SCOPE_LABELS[syncProgress.scope] || syncProgress.scope}
+              {syncProgress.page > 0 && ` (Seite ${syncProgress.page})`}
+              {syncProgress.newItems > 0 && ` – ${syncProgress.newItems.toLocaleString()} neu`}
             </p>
+          ) : (
+            <p class="progress-text">Sync läuft…</p>
           )}
         </div>
       )}

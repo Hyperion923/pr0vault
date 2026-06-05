@@ -4,7 +4,8 @@ import {signal} from "@preact/signals";
 const format = signal<"json" | "zip">("json");
 const scope = signal<"all" | "comments" | "uploads">("all");
 const exporting = signal(false);
-const exportResult = signal<{ success: boolean; filename?: string; error?: string } | null>(null);
+const exportResult = signal<{ success: boolean; filename?: string; downloadId?: number; error?: string } | null>(null);
+const openingFolder = signal(false);
 
 export function ExportPanel() {
   async function doExport() {
@@ -22,6 +23,15 @@ export function ExportPanel() {
       exportResult.value = { success: false, error: String(err) };
     } finally {
       exporting.value = false;
+    }
+  }
+
+  function openFolder() {
+    const downloadId = exportResult.value?.downloadId;
+    if (downloadId != null) {
+      openingFolder.value = true;
+      chrome.downloads.show(downloadId);
+      setTimeout(() => (openingFolder.value = false), 1000);
     }
   }
 
@@ -95,9 +105,20 @@ export function ExportPanel() {
 
       {exportResult.value && (
         <div class={`export-result ${exportResult.value.success ? "success" : "error"}`}>
-          {exportResult.value.success
-            ? `Export abgeschlossen: ${exportResult.value.filename}`
-            : `Fehler: ${exportResult.value.error}`}
+          {exportResult.value.success ? (
+            <>
+              Export abgeschlossen: {exportResult.value.filename}
+              <button
+                class="btn open-folder-btn"
+                onClick={openFolder}
+                disabled={openingFolder.value}
+              >
+                {openingFolder.value ? "Öffne…" : "Im Ordner öffnen"}
+              </button>
+            </>
+          ) : (
+            `Fehler: ${exportResult.value.error}`
+          )}
         </div>
       )}
     </div>

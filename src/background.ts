@@ -3,10 +3,37 @@
 
 import {db} from "./shared/db";
 import Fuse from "fuse.js";
-import {logErr, logSync} from "./shared/logger";
+
+
+import JSZip from "jszip";
+import { logSync, logErr } from "./shared/logger";
+import type {
+  VaultMessage,
+  VaultResponse,
+  SyncProgressMessage,
+  SyncCompleteMessage,
+} from "./shared/messages";
+import type { VaultStats, Comment, Message, ExportData } from "./shared/types";
 import {browser} from "./shared/browser";
-import type {SyncCompleteMessage, SyncProgressMessage, VaultMessage,} from "./shared/messages";
-import type {Comment, ExportData, Message, VaultStats} from "./shared/types";
+
+
+// ---- Install / Update Handler ----
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason === "install") {
+    // First install: enable auto-sync by default and trigger initial sync.
+    await chrome.storage.local.set({ autoSync: true });
+    await chrome.alarms.create("pr0vault-sync", { periodInMinutes: 60 });
+    logSync("SW", `Installed v${chrome.runtime.getManifest().version} — auto-sync enabled`);
+  } else if (details.reason === "update") {
+    // Re-arm alarm if user had auto-sync on (alarms persist but ensure correctness).
+    const { autoSync } = await chrome.storage.local.get("autoSync");
+    if (autoSync) {
+      await chrome.alarms.create("pr0vault-sync", { periodInMinutes: 60 });
+    }
+    logSync("SW", `Updated to v${chrome.runtime.getManifest().version}`);
+  }
+});
 
 // ---- Alarm Handler (Auto-Sync) ----
 
@@ -45,7 +72,53 @@ browser.runtime.onMessage.addListener(
         return getStats();
 
       case "EXPORT":
-        return handleExport(vaultMsg.format, vaultMsg.scope);
+
+        handleExport(msg.format, msg.scope).then((result) =>
+          sendResponse(result)
+        );
+        break;
+
+      case "CACHE_THUMB":
+        (async () => {
+          try {
+            const binary = Uint8Array.from(atob(msg.blobBase64), c => c.charCodeAt(0));
+            const blob = new Blob([binary], { type: "image/jpeg" });
+            await db.collectionItems
+              .where("itemId")
+              .equals(msg.itemId)
+              .modify({ thumbBlob: blob });
+          } catch (e) {
+            logErr("SW", `Thumb cache error: ${String(e)}`);
+          }
+          sendResponse({ success: true });
+        })();
+        break;
+
+      case "GET_COLLECTIONS":
+        (async () => {
+          const cols = await db.collections.toArray();
+          const counts: Record<number, number> = {};
+          for (const col of cols) {
+            counts[col.id] = await db.collectionItems.where("collectionId").equals(col.id).count();
+          }
+          sendResponse({ collections: cols, counts });
+        })();
+        break;
+
+      case "GET_COLLECTION_ITEMS":
+        (async () => {
+          const items = await db.collectionItems
+            .where("collectionId")
+            .equals(msg.collectionId)
+            .offset(msg.offset ?? 0)
+            .limit(msg.limit ?? 30)
+            .toArray();
+          const total = await db.collectionItems.where("collectionId").equals(msg.collectionId).count();
+          const atEnd = (msg.offset ?? 0) + items.length >= total;
+          sendResponse({ items, atEnd });
+        })();
+        break;
+    }
 
       default:
         // Return false for unhandled messages to allow other listeners or close channel
@@ -60,6 +133,9 @@ async function handleStoreBatch(payload: {
   uploads?: import("./shared/types").Upload[];
   comments?: Comment[];
   messages?: Message[];
+  filters?: import("./shared/types").FilterBookmark[];
+  collections?: import("./shared/types").Collection[];
+  collectionItems?: import("./shared/types").CollectionItem[];
 }) {
   const now = Date.now();
 
@@ -72,12 +148,39 @@ async function handleStoreBatch(payload: {
   if (payload.comments?.length) {
     await db.comments.bulkPut(payload.comments);
     await db.meta.put({ key: "lastSync", value: now });
+    invalidateFuseCache();
     logSync("SW", `Stored ${payload.comments.length} comments`);
   }
   if (payload.messages?.length) {
     await db.messages.bulkPut(payload.messages);
     await db.meta.put({ key: "lastSync", value: now });
+    invalidateFuseCache();
     logSync("SW", `Stored ${payload.messages.length} messages`);
+  }
+  if (payload.filters?.length) {
+    await db.filters.bulkPut(payload.filters);
+    await db.meta.put({ key: "lastSync", value: now });
+    logSync("SW", `Stored ${payload.filters.length} filters`);
+  }
+  if (payload.collections?.length) {
+    await db.collections.bulkPut(payload.collections);
+    await db.meta.put({ key: "lastSync", value: now });
+    logSync("SW", `Stored ${payload.collections.length} collections`);
+  }
+  if (payload.collectionItems?.length) {
+    // Merge: preserve existing thumbBlobs
+    const existing = await db.collectionItems
+      .where("[collectionId+itemId]")
+      .anyOf(payload.collectionItems.map(ci => [ci.collectionId, ci.itemId] as [number, number]))
+      .toArray();
+    const existingMap = new Map(existing.map(e => [`${e.collectionId}_${e.itemId}`, e]));
+    const merged = payload.collectionItems.map(ci => {
+      const prev = existingMap.get(`${ci.collectionId}_${ci.itemId}`);
+      return prev?.thumbBlob ? { ...ci, thumbBlob: prev.thumbBlob } : ci;
+    });
+    await db.collectionItems.bulkPut(merged);
+    await db.meta.put({ key: "lastSync", value: now });
+    logSync("SW", `Stored ${payload.collectionItems.length} collection items`);
   }
 }
 
@@ -87,7 +190,8 @@ async function sendSyncProgress(
   scope: string,
   page: number,
   total: number,
-  newItems: number
+  newItems: number,
+  done = false,
 ) {
   const msg: SyncProgressMessage = {
     type: "SYNC_PROGRESS",
@@ -95,9 +199,12 @@ async function sendSyncProgress(
     page,
     total,
     newItems,
+    done,
   };
+
   // Broadcast to popup via runtime
   browser.runtime.sendMessage(msg).catch(() => {});
+
 }
 
 async function getPr0Cookies(): Promise<string> {
@@ -150,75 +257,83 @@ async function fetchAPI(
 }
 
 async function syncComments(me: string, fromPopup: boolean) {
-  // Inkrementell: nur neuere als den letzten bekannten Kommentar holen
   const lastMeta = await db.meta.get("lastCommentTs");
   const lastTs = (lastMeta?.value as number) || 0;
   const isIncremental = lastTs > 0;
 
+  // Pagination state — MUST live outside the loop, otherwise we re-fetch page 1 forever.
   let after = isIncremental ? lastTs : 0;
+  let before = isIncremental ? 0 : Math.floor(Date.now() / 1000);
   let totalNew = 0;
   let page = 0;
+  const MAX_PAGES = 2000; // ~100k comments at 50/page
 
-  while (true) {
+  logSync("SW", `syncComments start (incremental=${isIncremental}, lastTs=${lastTs})`);
+
+  while (page < MAX_PAGES) {
     const params: Record<string, string> = { name: me, flags: "15" };
-    if (after > 0) {
+    if (isIncremental) {
       params.after = String(after);
     } else {
-      // Initial-Sync: starte bei neuesten, paginiere rückwärts mit before
-      params.before = String(Math.floor(Date.now() / 1000));
+      params.before = String(before);
     }
 
     const data = (await fetchAPI("/profile/comments", params)) as Record<string, unknown> | null;
-    if (!data || data.error) break;
+    if (!data) { logSync("SW", `syncComments: empty response page ${page}`); break; }
+    if (data.error) { logErr("SW", `syncComments API error: ${String(data.error)}`); break; }
 
     const comments = data.comments as Comment[] | undefined;
-    if (!comments || comments.length === 0) break;
+    if (!comments || comments.length === 0) { logSync("SW", `syncComments: no more comments at page ${page}`); break; }
 
-    // Bei Incremental-Sync: early stop wenn alle IDs schon bekannt
-    if (isIncremental) {
-      const knownIds = new Set(
-        (await db.comments.where("id").anyOf(comments.map(c => c.id)).toArray()).map(c => c.id)
-      );
-      const newComments = comments.filter(c => !knownIds.has(c.id));
-      if (newComments.length === 0 && knownIds.size > 0) break;
+    // Dedupe against existing
+    const knownIds = new Set(
+      (await db.comments.where("id").anyOf(comments.map(c => c.id)).toArray()).map(c => c.id)
+    );
+    const newComments = comments.filter(c => !knownIds.has(c.id));
 
+    if (newComments.length > 0) {
       await db.comments.bulkPut(newComments);
       await db.meta.put({ key: "lastSync", value: Date.now() });
+      invalidateFuseCache();
       totalNew += newComments.length;
-    } else {
-      // Initial backfill: alle speichern
-      await db.comments.bulkPut(comments);
-      await db.meta.put({ key: "lastSync", value: Date.now() });
-      totalNew += comments.length;
     }
+
     page++;
 
-    // Track newest timestamp
+    // Track newest seen timestamp for next incremental run (monotonic — never regress)
     const maxTs = Math.max(...comments.map(c => c.created));
-    await db.meta.put({ key: "lastCommentTs", value: maxTs });
+    const minTs = Math.min(...comments.map(c => c.created));
+    const prevMaxMeta = await db.meta.get("lastCommentTs");
+    const prevMax = (prevMaxMeta?.value as number) || 0;
+    if (maxTs > prevMax) await db.meta.put({ key: "lastCommentTs", value: maxTs });
 
     if (fromPopup) sendSyncProgress("comments", page, 0, totalNew);
 
     if (isIncremental) {
+      // Walk forward in time until we've caught up
       if (!data.hasNewer) break;
-      after = Math.max(...comments.map(c => c.created));
+      // If a whole page is already known and we have nothing newer, we're done.
+      if (newComments.length === 0) break;
+      after = maxTs;
     } else {
+      // Walk backward in time through ALL history. Don't stop early just because
+      // one page contains already-known comments — there could be gaps from a
+      // previous interrupted sync (e.g. MAX_PAGES hit).
       if (!data.hasOlder) break;
-      after = 0; // switch to before-based for next pages
+      const nextBefore = minTs;
+      // Safety: detect when pagination is not advancing (would loop forever).
+      if (nextBefore >= before) {
+        logErr("SW", `syncComments: pagination not advancing (before=${before}, nextBefore=${nextBefore}) — stop`);
+        break;
+      }
+      before = nextBefore;
     }
 
-    if (!isIncremental) {
-      if (!data.hasOlder) break;
-      // Use oldest comment's timestamp for next before-based page
-      params.before = String(comments[comments.length - 1].created);
-      // Drop after, use before only
-    }
-
-    // Throttle
     await new Promise(r => setTimeout(r, 300));
   }
 
-  logSync("SW", `Synced ${totalNew} comments (incremental: ${isIncremental})`);
+  if (page >= MAX_PAGES) logErr("SW", `syncComments: hit MAX_PAGES safety stop`);
+  logSync("SW", `syncComments done: ${totalNew} new (pages: ${page})`);
   return totalNew;
 }
 
@@ -228,104 +343,318 @@ async function syncUploads(me: string, fromPopup: boolean) {
   const isIncremental = lastId > 0;
 
   let newer: number | undefined = isIncremental ? lastId : undefined;
-  let older: number | undefined = isIncremental ? undefined : undefined;
+  let older: number | undefined = undefined;
   let totalNew = 0;
   let page = 0;
+  const MAX_PAGES = 1000;
 
-  while (true) {
+  logSync("SW", `syncUploads start (incremental=${isIncremental}, lastId=${lastId})`);
+
+  while (page < MAX_PAGES) {
     const params: Record<string, string> = { user: me, flags: "15" };
     if (newer !== undefined) params.newer = String(newer);
     if (older !== undefined) params.older = String(older);
 
     const data = (await fetchAPI("/items/get", params)) as Record<string, unknown> | null;
-    if (!data || data.error) break;
+    if (!data) { logSync("SW", `syncUploads: empty page ${page}`); break; }
+    if (data.error) { logErr("SW", `syncUploads API error: ${String(data.error)}`); break; }
 
     const items = data.items as import("./shared/types").Upload[] | undefined;
-    if (!items || items.length === 0) break;
+    if (!items || items.length === 0) { logSync("SW", `syncUploads: no items at page ${page}`); break; }
 
-    // Early stop when all known
     const knownIds = new Set(
       (await db.uploads.where("id").anyOf(items.map(i => i.id)).toArray()).map(i => i.id)
     );
     const newItems = items.filter(i => !knownIds.has(i.id));
 
-    if (isIncremental && newItems.length === 0) break;
+    if (isIncremental && newItems.length === 0) {
+      logSync("SW", `syncUploads: caught up (all ${items.length} known)`);
+      break;
+    }
 
-    const now = Date.now();
-    const synced = newItems.map((it) => ({ ...it, syncedAt: now }));
-    await db.uploads.bulkPut(synced);
-    await db.meta.put({ key: "lastSync", value: now });
-    totalNew += newItems.length;
+    if (newItems.length > 0) {
+      const now = Date.now();
+      const synced = newItems.map((it) => ({ ...it, syncedAt: now }));
+      await db.uploads.bulkPut(synced);
+      await db.meta.put({ key: "lastSync", value: now });
+      totalNew += newItems.length;
+    }
     page++;
 
-    // Track highest ID
     const maxId = Math.max(...items.map(i => i.id));
-    await db.meta.put({ key: "lastUploadId", value: maxId });
+    const minId = Math.min(...items.map(i => i.id));
+    const prevMaxMeta = await db.meta.get("lastUploadId");
+    const prevMax = (prevMaxMeta?.value as number) || 0;
+    if (maxId > prevMax) await db.meta.put({ key: "lastUploadId", value: maxId });
 
     if (fromPopup) sendSyncProgress("uploads", page, 0, totalNew);
 
     if (data.atEnd) break;
 
-    newer = isIncremental ? Math.max(...items.map(i => i.id)) : undefined;
-    if (!isIncremental) older = items[items.length - 1].id;
+    if (isIncremental) {
+      newer = maxId;
+    } else {
+      older = minId; // walk backward through history
+    }
 
     await new Promise(r => setTimeout(r, 300));
   }
 
-  logSync("SW", `Synced ${totalNew} uploads (incremental: ${isIncremental})`);
+  if (page >= MAX_PAGES) logErr("SW", `syncUploads: hit MAX_PAGES safety stop`);
+  logSync("SW", `syncUploads done: ${totalNew} new (pages: ${page})`);
   return totalNew;
 }
 
 async function syncFilters() {
   const data = (await fetchAPI("/bookmarks/get")) as Record<string, unknown> | null;
-  if (!data || data.error) return 0;
+  if (!data) { logSync("SW", `syncFilters: empty response`); return 0; }
+  if (data.error) { logErr("SW", `syncFilters API error: ${String(data.error)}`); return 0; }
   const bookmarks = data.bookmarks as import("./shared/types").FilterBookmark[] | undefined;
-  if (!bookmarks || bookmarks.length === 0) return 0;
+  if (!bookmarks || bookmarks.length === 0) { logSync("SW", `syncFilters: no bookmarks`); return 0; }
   const now = Date.now();
   const synced = bookmarks.map((b) => ({ ...b, syncedAt: now }));
   await db.filters.bulkPut(synced);
+  logSync("SW", `syncFilters: stored ${synced.length} bookmarks`);
   return synced.length;
 }
 
 async function syncCollections() {
   const data = (await fetchAPI("/collections/get")) as Record<string, unknown> | null;
-  if (!data || data.error) return 0;
-  const collections = data.collections as import("./shared/types").Collection[] | undefined;
-  if (!collections || collections.length === 0) return 0;
+  if (!data) { logSync("SW", `syncCollections: empty response`); return 0; }
+  if (data.error) { logErr("SW", `syncCollections API error: ${String(data.error)}`); return 0; }
+
+  const raw = data.collections as any[] | undefined;
   const now = Date.now();
-  const synced = collections.map((c) => ({ ...c, syncedAt: now }));
-  await db.collections.bulkPut(synced);
-  return synced.length;
+  let stored = 0;
+
+  if (raw?.length) {
+    const synced: import("./shared/types").Collection[] = raw.map((c: any) => ({
+      id: c.id ?? 0,
+      name: c.name ?? "",
+      keyword: c.keyword ?? "",
+      isPublic: !!c.isPublic,
+      isDefault: !!c.isDefault,
+      isCurated: false,
+      syncedAt: now,
+    }));
+    await db.collections.bulkPut(synced);
+    stored += synced.length;
+    logSync("SW", `syncCollections: stored ${synced.length} own collections`);
+  } else {
+    logSync("SW", `syncCollections: no own collections in response`);
+  }
+
+  // Kuratierte Collections (API liefert mal Array, mal verschiedene Keys)
+  const curatorCollections = (data.curatorCollections ?? data.curatedCollections) as any[] | undefined;
+  if (Array.isArray(curatorCollections) && curatorCollections.length > 0) {
+    const curated: import("./shared/types").Collection[] = curatorCollections.map((c: any) => ({
+      id: c.id ?? 0,
+      name: c.name ?? "",
+      keyword: c.keyword ?? "",
+      isPublic: !!c.isPublic,
+      isDefault: false,
+      isCurated: true,
+      syncedAt: now,
+    }));
+    await db.collections.bulkPut(curated);
+    stored += curated.length;
+    logSync("SW", `syncCollections: stored ${curated.length} curated collections`);
+  }
+
+  return stored;
 }
 
-async function syncInbox(me: string) {
+async function syncCollectionItems(fromPopup: boolean) {
+  const collections = await db.collections.toArray();
+  const me = await getUsername();
+  let totalNew = 0;
+  const MAX_PAGES = 500;
+
+  logSync("SW", `syncCollectionItems start: ${collections.length} collections (user=${me})`);
+
+  for (const col of collections) {
+    if (!col.keyword) {
+      logSync("SW", `syncCollectionItems: skip "${col.name}" (no keyword)`);
+      continue;
+    }
+    if (col.isCurated) {
+      // Curator-collections need different params; skip for now to avoid 400s.
+      logSync("SW", `syncCollectionItems: skip curated "${col.name}"`);
+      continue;
+    }
+
+    const metaKey = `lastCollectionItemId_${col.id}`;
+    const lastMeta = await db.meta.get(metaKey);
+    const lastId = (lastMeta?.value as number) || 0;
+    const isIncremental = lastId > 0;
+
+    let newer: number | undefined = isIncremental ? lastId : undefined;
+    let older: number | undefined = undefined;
+    let colNew = 0;
+    let page = 0;
+
+    while (page < MAX_PAGES) {
+      // CRITICAL: user param is required, otherwise pr0gramm returns items from
+      // ALL users matching the keyword (e.g. "favoriten" = public favorites lists worldwide).
+      const params: Record<string, string> = {
+        flags: "15",
+        user: me,
+        collection: col.keyword,
+      };
+      if (newer !== undefined) params.newer = String(newer);
+      if (older !== undefined) params.older = String(older);
+
+      try {
+        const data = (await fetchAPI("/items/get", params)) as Record<string, unknown> | null;
+        if (!data) { logSync("SW", `syncCollectionItems[${col.name}]: empty page ${page}`); break; }
+        if (data.error) { logErr("SW", `syncCollectionItems[${col.name}] API error: ${String(data.error)}`); break; }
+
+        const items = data.items as any[] | undefined;
+        if (!items || items.length === 0) { logSync("SW", `syncCollectionItems[${col.name}]: no items at page ${page}`); break; }
+
+        const now = Date.now();
+        const collectionItems: import("./shared/types").CollectionItem[] = items.map((it: any) => ({
+          collectionId: col.id,
+          itemId: it.id,
+          userId: it.userId ?? 0,
+          user: it.user ?? "",
+          created: it.created ?? 0,
+          image: it.image ?? "",
+          thumb: it.thumb ?? "",
+          flags: it.flags ?? 0,
+          mark: it.mark ?? 0,
+          up: it.up ?? 0,
+          down: it.down ?? 0,
+          tags: (it.tags ?? []) as import("./shared/types").Tag[],
+          syncedAt: now,
+        }));
+
+        // Dedupe / merge with existing thumbBlobs
+        const existing = await db.collectionItems
+          .where("[collectionId+itemId]")
+          .anyOf(collectionItems.map(ci => [ci.collectionId, ci.itemId] as [number, number]))
+          .toArray();
+        const existingMap = new Map(existing.map(e => [`${e.collectionId}_${e.itemId}`, e]));
+        const knownCount = existing.length;
+        const merged = collectionItems.map(ci => {
+          const prev = existingMap.get(`${ci.collectionId}_${ci.itemId}`);
+          return prev?.thumbBlob ? { ...ci, thumbBlob: prev.thumbBlob } : ci;
+        });
+
+        if (isIncremental && knownCount === items.length) {
+          logSync("SW", `syncCollectionItems[${col.name}]: caught up at page ${page}`);
+          break;
+        }
+
+        await db.collectionItems.bulkPut(merged);
+        const trulyNew = items.length - knownCount;
+        colNew += trulyNew;
+        totalNew += trulyNew;
+        page++;
+
+        const maxId = Math.max(...items.map(i => i.id));
+        const minId = Math.min(...items.map(i => i.id));
+        const prevMaxMeta = await db.meta.get(metaKey);
+        const prevMax = (prevMaxMeta?.value as number) || 0;
+        if (maxId > prevMax) await db.meta.put({ key: metaKey, value: maxId });
+        await db.meta.put({ key: "lastSync", value: now });
+
+        if (fromPopup && page <= 3) {
+          sendSyncProgress(`collection:${col.name}`, page, 0, totalNew);
+        }
+
+        if (data.atEnd) break;
+
+        if (isIncremental) {
+          newer = maxId;
+        } else {
+          older = minId;
+        }
+
+        await new Promise(r => setTimeout(r, 300));
+      } catch (e) {
+        logErr("SW", `Collection sync error (${col.name}): ${String(e)}`);
+        break;
+      }
+    }
+
+    if (page >= MAX_PAGES) logErr("SW", `syncCollectionItems[${col.name}]: hit MAX_PAGES safety stop`);
+    logSync("SW", `syncCollectionItems[${col.name}]: ${colNew} new (pages: ${page})`);
+  }
+
+  logSync("SW", `syncCollectionItems done: ${totalNew} total new items`);
+  return totalNew;
+}
+
+async function syncInbox(_me: string) {
   const lastMeta = await db.meta.get("lastInboxTs");
   const lastTs = (lastMeta?.value as number) || 0;
+  const isIncremental = lastTs > 0;
 
-  // Nutze /inbox/pending — markiert nichts als gelesen
-  const data = (await fetchAPI("/inbox/pending")) as Record<string, unknown> | null;
-  if (!data || data.error) return 0;
+  let older: number | undefined = undefined;
+  let totalNew = 0;
+  let page = 0;
+  const MAX_PAGES = 1000; // ~100k messages at 100/page
 
-  const messages = data.messages as import("./shared/types").Message[] | undefined;
-  if (!messages || messages.length === 0) return 0;
+  logSync("SW", `syncInbox start (incremental=${isIncremental}, lastTs=${lastTs})`);
 
-  // Early stop: nur neue Nachrichten seit letztem Sync
-  const newMessages = lastTs > 0
-    ? messages.filter(m => m.created > lastTs)
-    : messages;
+  while (page < MAX_PAGES) {
+    const params: Record<string, string> = {};
+    if (older !== undefined) params.older = String(older);
 
-  if (newMessages.length === 0) return 0;
+    const data = (await fetchAPI("/inbox/all", params)) as Record<string, unknown> | null;
+    if (!data) { logSync("SW", `syncInbox: empty page ${page}`); break; }
+    if (data.error) { logErr("SW", `syncInbox API error: ${String(data.error)}`); break; }
 
-  const now = Date.now();
-  const synced = newMessages.map((m) => ({ ...m, syncedAt: now }));
-  await db.messages.bulkPut(synced);
+    const messages = data.messages as import("./shared/types").Message[] | undefined;
+    if (!messages || messages.length === 0) { logSync("SW", `syncInbox: no more messages at page ${page}`); break; }
 
-  const maxTs = Math.max(...newMessages.map(m => m.created));
-  await db.meta.put({ key: "lastInboxTs", value: maxTs });
-  await db.meta.put({ key: "lastSync", value: now });
+    // Dedupe + incremental cutoff
+    const knownIds = new Set(
+      (await db.messages.where("id").anyOf(messages.map(m => m.id)).toArray()).map(m => m.id)
+    );
+    const filtered = messages.filter(m =>
+      !knownIds.has(m.id) && (!isIncremental || m.created > lastTs)
+    );
 
-  logSync("SW", `Stored ${synced.length} new inbox messages`);
-  return synced.length;
+    if (filtered.length > 0) {
+      const now = Date.now();
+      const synced = filtered.map((m) => ({ ...m, syncedAt: now }));
+      await db.messages.bulkPut(synced);
+      await db.meta.put({ key: "lastSync", value: now });
+      invalidateFuseCache();
+      totalNew += synced.length;
+    }
+
+    page++;
+
+    // Stop conditions: API end OR pagination not advancing
+    if (data.atEnd) break;
+    const nextOlder = messages[messages.length - 1].created;
+    if (older !== undefined && nextOlder >= older) {
+      logErr("SW", `syncInbox: pagination not advancing (older=${older}, next=${nextOlder}) — stop`);
+      break;
+    }
+    // Incremental: stop when an entire page is older than our cutoff AND known.
+    if (isIncremental && filtered.length === 0 && messages.every(m => m.created <= lastTs)) {
+      logSync("SW", `syncInbox: reached incremental cutoff at page ${page}`);
+      break;
+    }
+
+    older = nextOlder;
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  if (page >= MAX_PAGES) logErr("SW", `syncInbox: hit MAX_PAGES safety stop`);
+
+  // Track highest seen timestamp
+  if (totalNew > 0) {
+    const maxRow = await db.messages.orderBy("created").last();
+    if (maxRow) await db.meta.put({ key: "lastInboxTs", value: maxRow.created });
+  }
+
+  logSync("SW", `syncInbox done: ${totalNew} new (pages: ${page})`);
+  return totalNew;
 }
 
 async function handleSyncStart(scope: string): Promise<VaultStats> {
@@ -348,11 +677,28 @@ async function handleSyncStart(scope: string): Promise<VaultStats> {
   const doCollections = doAll || scope === "collections";
   const doInbox = doAll || scope === "inbox";
 
-  if (doUploads) await syncUploads(me, true);
-  if (doComments) await syncComments(me, true);
-  if (doFilters) { try { await syncFilters(); } catch(e) { logErr("SW", `Filter sync error: ${String(e)}`); } }
-  if (doCollections) { try { await syncCollections(); } catch(e) { logErr("SW", `Collection sync error: ${String(e)}`); } }
-  if (doInbox) { try { await syncInbox(me); } catch(e) { logErr("SW", `Inbox sync error: ${String(e)}`); } }
+  if (doUploads) {
+    try { await syncUploads(me, true); }
+    catch (e) { logErr("SW", `syncUploads failed: ${String(e)}`); }
+  }
+  if (doComments) {
+    try { await syncComments(me, true); }
+    catch (e) { logErr("SW", `syncComments failed: ${String(e)}`); }
+  }
+  if (doFilters) {
+    try { await syncFilters(); }
+    catch (e) { logErr("SW", `syncFilters failed: ${String(e)}`); }
+  }
+  if (doCollections) {
+    try { await syncCollections(); }
+    catch (e) { logErr("SW", `syncCollections failed: ${String(e)}`); }
+    try { await syncCollectionItems(true); }
+    catch (e) { logErr("SW", `syncCollectionItems failed: ${String(e)}`); }
+  }
+  if (doInbox) {
+    try { await syncInbox(me); }
+    catch (e) { logErr("SW", `syncInbox failed: ${String(e)}`); }
+  }
 
   const stats = await getStats();
   const complete: SyncCompleteMessage = { type: "SYNC_COMPLETE", stats };
@@ -363,24 +709,41 @@ async function handleSyncStart(scope: string): Promise<VaultStats> {
 
 // ---- Search ----
 
-async function handleSearch(query: string, limit: number) {
-  const comments = await db.comments.toArray();
-  const messages = await db.messages.toArray();
+// Cached Fuse instance — rebuilt only after sync writes new comments/messages.
+type SearchableItem = (Comment | Message) & { _type: "comment" | "message" };
+let fuseCache: { fuse: Fuse<SearchableItem>; builtAt: number } | null = null;
+let searchableCount = 0;
 
-  const all: Array<Comment | Message & { _type: string }> = [
-    ...comments.map((c) => ({ ...c, _type: "comment" })),
-    ...messages.map((m) => ({ ...m, _type: "message" })),
+function invalidateFuseCache() {
+  fuseCache = null;
+}
+
+async function buildFuse(): Promise<Fuse<SearchableItem>> {
+  const [comments, messages] = await Promise.all([
+    db.comments.toArray(),
+    db.messages.toArray(),
+  ]);
+  const all: SearchableItem[] = [
+    ...comments.map((c) => ({ ...c, _type: "comment" as const })),
+    ...messages.map((m) => ({ ...m, _type: "message" as const })),
   ];
-
-  const fuse = new Fuse(all, {
+  searchableCount = all.length;
+  return new Fuse(all, {
     keys: ["content", "message"],
     threshold: 0.4,
     minMatchCharLength: 2,
     includeScore: true,
     includeMatches: true,
   });
+}
 
-  const fuseResults = fuse.search(query).slice(0, limit);
+async function handleSearch(query: string, limit: number) {
+  if (!fuseCache) {
+    const fuse = await buildFuse();
+    fuseCache = { fuse, builtAt: Date.now() };
+    logSync("SW", `Fuse index built (${searchableCount} items)`);
+  }
+  const fuseResults = fuseCache.fuse.search(query).slice(0, limit);
   return fuseResults.map((r) => ({ ...r, score: r.score ?? 0 }));
 }
 
@@ -398,7 +761,7 @@ async function getStats(): Promise<VaultStats> {
 async function handleExport(
   format: "json" | "zip",
   scope: "all" | "comments" | "uploads"
-): Promise<{ success: boolean; filename?: string; error?: string }> {
+): Promise<{ success: boolean; filename?: string; downloadId?: number; error?: string }> {
   try {
     const uploads = scope === "all" || scope === "uploads" ? await db.uploads.toArray() : [];
     const comments = scope === "all" || scope === "comments" ? await db.comments.toArray() : [];
@@ -409,12 +772,6 @@ async function handleExport(
     const collectionItems = scope === "all"
       ? await db.collectionItems.toArray()
       : [];
-    const collectionMap = new Map<number, number[]>();
-    for (const ci of collectionItems) {
-      const arr = collectionMap.get(ci.collectionId) || [];
-      arr.push(ci.itemId);
-      collectionMap.set(ci.collectionId, arr);
-    }
 
     const data: ExportData = {
       exportDate: new Date().toISOString(),
@@ -425,7 +782,7 @@ async function handleExport(
       filters,
       collections: collections.map((c) => ({
         collection: c,
-        items: collectionMap.get(c.id) || [],
+        items: collectionItems.filter(ci => ci.collectionId === c.id),
       })),
       messages,
     };
@@ -433,22 +790,21 @@ async function handleExport(
     const dateStr = new Date().toISOString().slice(0, 10);
 
     if (format === "json") {
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
+      // MV3 service workers have no URL.createObjectURL — build a data URL directly.
+      const json = JSON.stringify(data, null, 2);
+      const url = `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
 
-      await browser.downloads.download({
+
+      const downloadId = await browser.downloads.download({
+
         url,
         filename: `pr0vault-export-${dateStr}.json`,
         saveAs: true,
       });
 
-      return { success: true, filename: `pr0vault-export-${dateStr}.json` };
+      return { success: true, filename: `pr0vault-export-${dateStr}.json`, downloadId };
     } else {
       // ZIP export
-      const JSZipModule = await import("jszip");
-      const JSZip = JSZipModule.default;
       const zip = new JSZip();
 
       zip.file("data.json", JSON.stringify(data, null, 2));
@@ -467,16 +823,18 @@ async function handleExport(
       const readme = `pr0Vault Export\n==============\nDatum: ${data.exportDate}\nUser: ${data.user}\nUploads: ${data.uploads.length}\nComments: ${data.comments.length}\n`;
       zip.file("README.txt", readme);
 
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(zipBlob);
+      // Generate base64 → data URL instead of createObjectURL (unavailable in the SW).
+      const base64 = await zip.generateAsync({ type: "base64" });
+      const url = `data:application/zip;base64,${base64}`;
 
-      await browser.downloads.download({
+      const downloadId = await browser.downloads.download({
+
         url,
         filename: `pr0vault-export-${dateStr}.zip`,
         saveAs: true,
       });
 
-      return { success: true, filename: `pr0vault-export-${dateStr}.zip` };
+      return { success: true, filename: `pr0vault-export-${dateStr}.zip`, downloadId };
     }
   } catch (err) {
     return { success: false, error: String(err) };
