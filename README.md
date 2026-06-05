@@ -11,7 +11,7 @@ Backup aller eigenen Inhalte — lokal im Browser.
 - **Auto-Backup**: Hochlads, Kommentare, Nachrichten, Filter & Sammlungen
 - **Full-Text-Search**: Blitzschnelle Suche über eigene Kommentare & Nachrichten
 - **DSGVO-Export**: JSON oder ZIP — alle Daten gehören dir
-- **Auto-Sync**: Hält dein Backup alle 30 Minuten aktuell
+- **Auto-Sync**: Hält dein Backup alle 60 Minuten aktuell
 - **Dark Mode**: 8 Akzentfarben aus dem offiziellen pr0gramm-Styleguide
 
 ## Tech Stack
