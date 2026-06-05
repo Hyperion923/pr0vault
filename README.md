@@ -17,13 +17,24 @@ TypeScript · Preact · Dexie.js · Fuse.js · JSZip · Vite · Manifest V3
 
 ## Development
 
-```bash
+\`\`\`bash
 pnpm install
 pnpm run build        # Build für Chrome
 pnpm run build:icons  # Nur Icons generieren
-```
+\`\`\`
 
-Zum Laden in Chrome: `chrome://extensions` → "Entpackte Erweiterung laden" → `dist/` auswählen.
+Zum Laden in Chrome: \`chrome://extensions\` → \"Entpackte Erweiterung laden\" → \`dist/\` auswählen.
+
+## Installation
+
+1. [Neueste Version herunterladen](https://github.com/Livvux/pr0vault/releases/latest) (pr0vault-v*.zip)
+2. ZIP entpacken
+3. \`chrome://extensions\` öffnen
+4. \"Entwicklermodus\" (oben rechts) aktivieren
+5. \"Entpackte Erweiterung laden\" → den entpackten Ordner auswählen
+6. Auf pr0gramm.com einloggen — Extension klickt aufs Icon
+
+> **Hinweis:** Der Chrome Web Store Review läuft noch. Sobald freigegeben, ist One-Click-Install verfügbar.
 
 ## API
 
