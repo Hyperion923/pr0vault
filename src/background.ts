@@ -3,6 +3,7 @@
 
 import { db } from "./shared/db";
 import Fuse from "fuse.js";
+import JSZip from "jszip";
 import { logSync, logErr } from "./shared/logger";
 import type {
   VaultMessage,
@@ -447,10 +448,9 @@ async function handleExport(
     const dateStr = new Date().toISOString().slice(0, 10);
 
     if (format === "json") {
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
+      // MV3 service workers have no URL.createObjectURL — build a data URL directly.
+      const json = JSON.stringify(data, null, 2);
+      const url = `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
 
       await chrome.downloads.download({
         url,
@@ -461,8 +461,6 @@ async function handleExport(
       return { success: true, filename: `pr0vault-export-${dateStr}.json` };
     } else {
       // ZIP export
-      const JSZipModule = await import("jszip");
-      const JSZip = JSZipModule.default;
       const zip = new JSZip();
 
       zip.file("data.json", JSON.stringify(data, null, 2));
@@ -481,8 +479,9 @@ async function handleExport(
       const readme = `pr0Vault Export\n==============\nDatum: ${data.exportDate}\nUser: ${data.user}\nUploads: ${data.uploads.length}\nComments: ${data.comments.length}\n`;
       zip.file("README.txt", readme);
 
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(zipBlob);
+      // Generate base64 → data URL instead of createObjectURL (unavailable in the SW).
+      const base64 = await zip.generateAsync({ type: "base64" });
+      const url = `data:application/zip;base64,${base64}`;
 
       await chrome.downloads.download({
         url,
