@@ -3,12 +3,16 @@
 Dein digitales Gedächtnis auf pr0gramm. Chrome Extension für automatisches
 Backup aller eigenen Inhalte — lokal im Browser.
 
+<img width="1280" height="800" alt="pr0gramm" src="https://github.com/user-attachments/assets/bcd4c168-6292-4f1e-9fa7-22f186306399" />
+
+
+
 ## Features
 
 - **Auto-Backup**: Hochlads, Kommentare, Nachrichten, Filter & Sammlungen
 - **Full-Text-Search**: Blitzschnelle Suche über eigene Kommentare & Nachrichten
 - **DSGVO-Export**: JSON oder ZIP — alle Daten gehören dir
-- **Auto-Sync**: Hält dein Backup alle 30 Minuten aktuell
+- **Auto-Sync**: Hält dein Backup alle 60 Minuten aktuell
 - **Dark Mode**: 8 Akzentfarben aus dem offiziellen pr0gramm-Styleguide
 
 ## Tech Stack
@@ -17,11 +21,9 @@ TypeScript · Preact · Dexie.js · Fuse.js · JSZip · Vite · Manifest V3
 
 ## Development
 
-\`\`\`bash
 pnpm install
 pnpm run build        # Build für Chrome
 pnpm run build:icons  # Nur Icons generieren
-\`\`\`
 
 Zum Laden in Chrome: \`chrome://extensions\` → \"Entpackte Erweiterung laden\" → \`dist/\` auswählen.
 
