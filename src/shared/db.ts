@@ -6,7 +6,7 @@ import type {
   Comment,
   FilterBookmark,
   Collection,
-  CollectionMembership,
+  CollectionItem,
   Message,
   MetaEntry,
 } from "./types";
@@ -16,7 +16,7 @@ export class VaultDB extends Dexie {
   comments!: Table<Comment, number>;
   filters!: Table<FilterBookmark, string>;
   collections!: Table<Collection, number>;
-  collectionItems!: Table<CollectionMembership, [number, number]>;
+  collectionItems!: Table<CollectionItem, [number, number]>;
   messages!: Table<Message, number>;
   meta!: Table<MetaEntry, string>;
 
