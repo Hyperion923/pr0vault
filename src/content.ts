@@ -167,4 +167,5 @@ browser.runtime.onMessage.addListener((msg: any) => {
       .then((r) => r.json())
       .catch((err) => ({ error: String(err) }));
   }
+  return false;
 });

@@ -24,8 +24,7 @@ browser.runtime.onMessage.addListener(
     const vaultMsg = msg as VaultMessage;
     switch (vaultMsg.type) {
       case "STORE_BATCH":
-        handleStoreBatch(vaultMsg.payload);
-        return Promise.resolve({ success: true });
+        return handleStoreBatch(vaultMsg.payload).then(() => ({ success: true }));
 
       case "SYNC_START":
         logSync("SW", `Sync gestartet: ${vaultMsg.scope}`);
@@ -47,6 +46,10 @@ browser.runtime.onMessage.addListener(
 
       case "EXPORT":
         return handleExport(vaultMsg.format, vaultMsg.scope);
+
+      default:
+        // Return false for unhandled messages to allow other listeners or close channel
+        return false;
     }
   }
 );
