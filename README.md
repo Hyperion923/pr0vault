@@ -25,7 +25,17 @@ pnpm install
 pnpm run build        # Build für Chrome
 pnpm run build:icons  # Nur Icons generieren
 
-Zum Laden in Chrome: \`chrome://extensions\` → \"Entpackte Erweiterung laden\" → \`dist/\` auswählen.
+Zum Laden in Chrome: `chrome://extensions` → "Entpackte Erweiterung laden" → `dist/` auswählen.
+
+## Release
+
+```sh
+pnpm release minor              # bumpt 0.x.0 → 0.(x+1).0 in package.json + manifest.json, committet, taggt
+git push origin main --follow-tags
+```
+
+GitHub Action baut, zipt `dist/`, erstellt Release mit Auto-Changelog.
+Siehe [`AGENTS.md`](AGENTS.md) für Details.
 
 ## Installation
 
