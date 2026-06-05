@@ -3,6 +3,9 @@
 Dein digitales Gedächtnis auf pr0gramm. Chrome Extension für automatisches
 Backup aller eigenen Inhalte — lokal im Browser.
 
+<img width="1280" height="800" alt="pr0gramm" src="https://github.com/user-attachments/assets/3a8c2125-f80a-4bef-9768-ef2f972faef7" />
+
+
 ## Features
 
 - **Auto-Backup**: Hochlads, Kommentare, Nachrichten, Filter & Sammlungen
