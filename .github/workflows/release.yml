@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify version match
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          echo "tag=$TAG pkg=$PKG manifest=$MANIFEST"
+          if [ "$TAG" != "$PKG" ] || [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Version mismatch — tag=$TAG package.json=$PKG manifest.json=$MANIFEST"
+            exit 1
+          fi
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Package extension
+        run: |
+          mkdir -p release
+          cd dist
+          zip -r "../release/pr0vault-${GITHUB_REF_NAME}.zip" . -x "*.DS_Store"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          {
+            echo "## Changes"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              git log --pretty=format:"- %s (%h)" "$PREV_TAG..${GITHUB_REF_NAME}" --no-merges
+            else
+              git log --pretty=format:"- %s (%h)" --no-merges
+            fi
+            echo ""
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo "1. ZIP herunterladen und entpacken"
+            echo "2. \`chrome://extensions\` öffnen"
+            echo "3. \"Entwicklermodus\" aktivieren"
+            echo "4. \"Entpackte Erweiterung laden\" → entpackten Ordner auswählen"
+          } > CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "release/pr0vault-${GITHUB_REF_NAME}.zip" \
+            --title "pr0Vault ${GITHUB_REF_NAME}" \
+            --notes-file CHANGELOG.md
