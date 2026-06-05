@@ -18,7 +18,7 @@ function toggleAutoSync() {
   chrome.storage.local.set({ autoSync: autoSync.value });
   // Create/clear periodic alarm
   if (autoSync.value) {
-    chrome.alarms.create("pr0vault-sync", { periodInMinutes: 30 });
+    chrome.alarms.create("pr0vault-sync", { periodInMinutes: 60 });
   } else {
     chrome.alarms.clear("pr0vault-sync");
   }
@@ -155,7 +155,7 @@ export function Dashboard({ stats, syncState, syncProgress }: Props) {
           {syncState.value === "syncing" ? "Synchronisiere…" : "Synchronisieren"}
         </button>
 
-        <label class="auto-sync-toggle" title="Hält Backup automatisch aktuell (alle 30 Min)">
+        <label class="auto-sync-toggle" title="Hält Backup automatisch aktuell (alle 60 Min, nur neue Inhalte)">
           <input
             type="checkbox"
             checked={autoSync.value}
