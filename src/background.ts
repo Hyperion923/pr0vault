@@ -164,22 +164,23 @@ async function fetchAPI(
 }
 
 async function syncComments(me: string, fromPopup: boolean) {
-  // Inkrementell: nur neuere als den letzten bekannten Kommentar holen
   const lastMeta = await db.meta.get("lastCommentTs");
   const lastTs = (lastMeta?.value as number) || 0;
   const isIncremental = lastTs > 0;
 
-  let after = isIncremental ? lastTs : 0;
   let totalNew = 0;
   let page = 0;
+  let newestTs = lastTs;
+
+  let before = Math.floor(Date.now() / 1000);
+  let after = lastTs;
 
   while (true) {
     const params: Record<string, string> = { name: me, flags: "15" };
-    if (after > 0) {
+    if (isIncremental) {
       params.after = String(after);
     } else {
-      // Initial-Sync: starte bei neuesten, paginiere rückwärts mit before
-      params.before = String(Math.floor(Date.now() / 1000));
+      params.before = String(before);
     }
 
     const data = (await fetchAPI("/profile/comments", params)) as Record<string, unknown> | null;
@@ -188,44 +189,31 @@ async function syncComments(me: string, fromPopup: boolean) {
     const comments = data.comments as Comment[] | undefined;
     if (!comments || comments.length === 0) break;
 
-    // Bei Incremental-Sync: early stop wenn alle IDs schon bekannt
-    if (isIncremental) {
-      const knownIds = new Set(
-        (await db.comments.where("id").anyOf(comments.map(c => c.id)).toArray()).map(c => c.id)
-      );
-      const newComments = comments.filter(c => !knownIds.has(c.id));
-      if (newComments.length === 0 && knownIds.size > 0) break;
+    // Skip already-stored comments; stop once a page yields nothing new.
+    const knownIds = new Set(
+      (await db.comments.where("id").anyOf(comments.map(c => c.id)).toArray()).map(c => c.id)
+    );
+    const newComments = comments.filter(c => !knownIds.has(c.id));
+    if (newComments.length === 0) break;
 
-      await db.comments.bulkPut(newComments);
-      await db.meta.put({ key: "lastSync", value: Date.now() });
-      totalNew += newComments.length;
-    } else {
-      // Initial backfill: alle speichern
-      await db.comments.bulkPut(comments);
-      await db.meta.put({ key: "lastSync", value: Date.now() });
-      totalNew += comments.length;
-    }
+    await db.comments.bulkPut(newComments);
+    totalNew += newComments.length;
     page++;
 
-    // Track newest timestamp
-    const maxTs = Math.max(...comments.map(c => c.created));
-    await db.meta.put({ key: "lastCommentTs", value: maxTs });
+    // Resume cursor = newest timestamp ever seen; never regress it while
+    // paginating backwards through the initial backfill.
+    newestTs = comments.reduce((m, c) => Math.max(m, c.created), newestTs);
+    await db.meta.put({ key: "lastCommentTs", value: newestTs });
+    await db.meta.put({ key: "lastSync", value: Date.now() });
 
     if (fromPopup) sendSyncProgress("comments", page, 0, totalNew);
 
     if (isIncremental) {
       if (!data.hasNewer) break;
-      after = Math.max(...comments.map(c => c.created));
+      after = comments.reduce((m, c) => Math.max(m, c.created), after);
     } else {
       if (!data.hasOlder) break;
-      after = 0; // switch to before-based for next pages
-    }
-
-    if (!isIncremental) {
-      if (!data.hasOlder) break;
-      // Use oldest comment's timestamp for next before-based page
-      params.before = String(comments[comments.length - 1].created);
-      // Drop after, use before only
+      before = comments.reduce((m, c) => Math.min(m, c.created), before);
     }
 
     // Throttle
