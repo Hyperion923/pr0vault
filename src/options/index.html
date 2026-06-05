@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pr0Vault — Einstellungen</title>
+    <style>
+      :root {
+        --bg: #161618;
+        --bg-alt: #212121;
+        --text: #f2f5f4;
+        --text-muted: #888888;
+        --accent-blue: #008fff;
+        --logo-orange: #d23c22;
+        --border: #333;
+        --error: #ee4d2e;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 24px;
+        line-height: 1.6;
+      }
+      h1 { font-size: 20px; color: var(--logo-orange); margin-bottom: 4px; }
+      h1 span { font-size: 12px; color: var(--text-muted); }
+      h2 { font-size: 14px; color: var(--text-muted); margin: 24px 0 12px; text-transform: uppercase; letter-spacing: 1px; }
+      .option { margin: 12px 0; padding: 12px; background: var(--bg-alt); border-radius: 6px; }
+      .option label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+      .option input[type="radio"] { accent-color: var(--accent-blue); }
+      .option .desc { font-size: 11px; color: var(--text-muted); margin-top: 4px; margin-left: 24px; }
+      .btn-danger {
+        padding: 8px 16px;
+        border: 1px solid var(--error);
+        background: transparent;
+        color: var(--error);
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: inherit;
+        margin-top: 12px;
+      }
+      .btn-danger:hover { background: rgba(238,77,46,0.1); }
+      .color-picker { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+      .color-swatch { width: 32px; height: 32px; border-radius: 6px; cursor: pointer; border: 2px solid transparent; transition: border-color 0.15s; }
+      .color-swatch.selected { border-color: #fff; }
+      .color-swatch:hover { border-color: rgba(255,255,255,0.5); }
+      .color-label { font-size: 10px; color: var(--text-muted); text-align: center; margin-top: 2px; }
+      .status { margin-top: 8px; font-size: 12px; }
+      .status.success { color: var(--accent-blue); }
+      .status.error { color: var(--error); }
+      .info { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
+    </style>
+  </head>
+  <body>
+    <h1>pr0Vault <span>v0.1.0</span></h1>
+    <p style="color:var(--text-muted);font-size:13px">Dein digitales Gedächtnis auf pr0gramm.</p>
+
+    <h2>Speicherumfang</h2>
+    <div class="option">
+      <label>
+        <input type="radio" name="storageScope" value="metadata" checked />
+        Nur Metadaten (~2-5 MB)
+      </label>
+      <div class="desc">Comments, Bookmarks, Inbox als Text. Uploads nur als Referenz (ID, Thumb-URL, Tags). Keine Bilder/Videos.</div>
+    </div>
+    <div class="option">
+      <label>
+        <input type="radio" name="storageScope" value="thumbnails" />
+        Metadaten + Thumbnails (~10-15 MB)
+      </label>
+      <div class="desc">Zusätzlich zu Metadaten: Thumbnails der eigenen Uploads (~5-10 KB pro Upload).</div>
+    </div>
+    <div class="option">
+      <label>
+        <input type="radio" name="storageScope" value="full" />
+        Alles inkl. Vollbilder (~100-500 MB+)
+      </label>
+      <div class="desc">Komplette Medien-Dateien lokal speichern. Echtes Offline-Backup.</div>
+    </div>
+
+    <h2>Akzentfarbe</h2>
+    <p style="color:var(--text-muted);font-size:12px">Wähle eine der pr0gramm-Farben für die UI-Akzente.</p>
+    <div class="color-picker" id="colorPicker">
+      <div><div class="color-swatch" data-color="#008fff" style="background:#008fff" title="Episches Blau"></div><div class="color-label">Episches Blau</div></div>
+      <div><div class="color-swatch" data-color="#1db992" style="background:#1db992" title="Angenehmes Grün"></div><div class="color-label">Grün</div></div>
+      <div><div class="color-swatch" data-color="#bfbc06" style="background:#bfbc06" title="Olivgrün d. Friedens"></div><div class="color-label">Oliv</div></div>
+      <div><div class="color-swatch" data-color="#f7c516" style="background:#f7c516" title="Ein Gelb"></div><div class="color-label">Gelb</div></div>
+      <div><div class="color-swatch" data-color="#fc8833" style="background:#fc8833" title="DOOFES PASSIERT"></div><div class="color-label">Orange</div></div>
+      <div><div class="color-swatch" data-color="#ee4d2e" style="background:#ee4d2e" title="Orange"></div><div class="color-label">Hellrot</div></div>
+      <div><div class="color-swatch selected" data-color="#d23c22" style="background:#d23c22" title="Logo-Orange"></div><div class="color-label">Logo-Orange</div></div>
+      <div><div class="color-swatch" data-color="#ff0082" style="background:#ff0082" title="Altes pr0gramm"></div><div class="color-label">Alt-Pr0</div></div>
+    </div>
+
+    <h2>Datenverwaltung</h2>
+    <p style="color:var(--text-muted);font-size:12px">Alle lokal gespeicherten Backup-Daten löschen. Dieser Vorgang kann nicht rückgängig gemacht werden.</p>
+    <button class="btn-danger" id="deleteBtn">Alle Daten löschen</button>
+    <div class="status" id="status"></div>
+
+    <div class="info">
+      <p>pr0Vault speichert alle Daten ausschließlich lokal in deinem Browser (IndexedDB).</p>
+      <p>Keine Daten werden an Dritte übertragen. Kein Tracking. Open Source.</p>
+      <p style="margin-top:8px">Permissions: <code>storage</code> (Settings), <code>unlimitedStorage</code> (große Backups), <code>downloads</code> (Export), <code>host:pr0gramm.com</code> (API-Interception), <code>host:img.pr0gramm.com</code> (Thumbnail-Download).</p>
+    </div>
+
+    <script>
+      // Load saved setting
+      chrome.storage.local.get("storageScope", (data) => {
+        if (data.storageScope) {
+          const radio = document.querySelector(`input[value="${data.storageScope}"]`);
+          if (radio) radio.checked = true;
+        }
+      });
+
+      // Save on change
+      document.querySelectorAll('input[name="storageScope"]').forEach((el) => {
+        el.addEventListener("change", () => {
+          chrome.storage.local.set({ storageScope: el.value });
+        });
+      });
+
+      // Color theme
+      const DEFAULT_COLOR = "#d23c22";
+      chrome.storage.local.get("accentColor", (data) => {
+        const color = data.accentColor || DEFAULT_COLOR;
+        document.querySelectorAll('.color-swatch').forEach(s => {
+          s.classList.toggle('selected', s.dataset.color === color);
+        });
+      });
+      document.getElementById("colorPicker").addEventListener("click", (e) => {
+        const swatch = e.target.closest('.color-swatch');
+        if (!swatch) return;
+        const color = swatch.dataset.color;
+        chrome.storage.local.set({ accentColor: color });
+        document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('selected'));
+        swatch.classList.add('selected');
+      });
+
+      // Delete all data
+      document.getElementById("deleteBtn").addEventListener("click", () => {
+        if (!confirm("Wirklich ALLE gespeicherten Backup-Daten löschen? Das kann nicht rückgängig gemacht werden.")) return;
+
+        const status = document.getElementById("status");
+        const request = indexedDB.deleteDatabase("pr0Vault");
+        request.onsuccess = () => {
+          chrome.storage.local.clear();
+          status.textContent = "Alle Daten gelöscht.";
+          status.className = "status success";
+        };
+        request.onerror = () => {
+          status.textContent = "Fehler beim Löschen.";
+          status.className = "status error";
+        };
+      });
+    </script>
+  </body>
+</html>
