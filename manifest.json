@@ -19,6 +19,12 @@
       "run_at": "document_start"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/page-hook.js"],
+      "matches": ["https://pr0gramm.com/*"]
+    }
+  ],
   "action": {
     "default_popup": "src/popup/index.html",
     "default_title": "pr0Vault"

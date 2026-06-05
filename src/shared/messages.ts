@@ -64,6 +64,7 @@ export interface SyncProgressMessage {
   page: number;
   total: number;
   newItems: number;
+  done?: boolean;
 }
 
 export interface SyncCompleteMessage {
