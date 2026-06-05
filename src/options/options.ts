@@ -1,17 +1,6 @@
-// Load saved setting
-chrome.storage.local.get("storageScope", (data) => {
-  if (data.storageScope) {
-    const radio = document.querySelector(`input[value="${data.storageScope}"]`);
-    if (radio) (radio as HTMLInputElement).checked = true;
-  }
-});
-
-// Save on change
-document.querySelectorAll('input[name="storageScope"]').forEach((el) => {
-  el.addEventListener("change", () => {
-    chrome.storage.local.set({ storageScope: (el as HTMLInputElement).value });
-  });
-});
+// Show running extension version (from manifest, not hardcoded).
+const versionLabel = document.getElementById("versionLabel");
+if (versionLabel) versionLabel.textContent = `v${chrome.runtime.getManifest().version}`;
 
 // Color theme
 const DEFAULT_COLOR = "#d23c22";

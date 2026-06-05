@@ -1,9 +1,31 @@
-// pr0Vault — Content Script (injected on pr0gramm.com)
-// Intercepts fetch/XHR API responses and mirrors them to IndexedDB via Service Worker.
+// pr0Vault — Content Script (Isolated World on pr0gramm.com)
+// Two responsibilities:
+//   1. Inject page-hook.js into the page's MAIN world so we can actually
+//      intercept pr0gramm's own fetch/XHR calls (an isolated-world override
+//      is invisible to page-context code).
+//   2. Receive page-hook postMessages, batch them, and forward to the
+//      service worker via chrome.runtime.
 
 import type { Upload, Comment, Message, FilterBookmark, Collection, CollectionItem } from "./shared/types";
 import type { StoreBatchMessage } from "./shared/messages";
 import { logSync, logErr } from "./shared/logger";
+
+const HOOK_TAG = "PR0VAULT_API";
+
+// ---- Inject page hook ASAP ----
+
+(function injectPageHook() {
+  try {
+    const url = chrome.runtime.getURL("src/page-hook.js");
+    const s = document.createElement("script");
+    s.src = url;
+    s.async = false; // load synchronously so it runs before pr0gramm's bundle
+    (document.head || document.documentElement).prepend(s);
+    s.onload = () => s.remove();
+  } catch (e) {
+    logErr("CS", `inject page-hook failed: ${String(e)}`);
+  }
+})();
 
 interface PendingBatch {
   uploads?: Upload[];
@@ -23,16 +45,14 @@ function flush() {
       type: "STORE_BATCH",
       payload: pendingBatch,
     };
-    console.log("[pr0Vault CS] Flushing batch:", Object.keys(pendingBatch).map(k => `${k}:${((pendingBatch as Record<string, unknown[]>)[k]).length}`).join(", "));
-    // Send synchronously to ensure data is not lost
     try {
       chrome.runtime.sendMessage(msg, () => {
         if (chrome.runtime.lastError) {
-          console.error("[pr0Vault CS] sendMessage error:", chrome.runtime.lastError.message);
+          // SW might be inactive — silent.
         }
       });
     } catch {
-      // silent
+      /* SW gone, ignore */
     }
     pendingBatch = {};
   }
@@ -44,12 +64,11 @@ function flush() {
 
 function enqueue(table: keyof PendingBatch, items: unknown[]) {
   if (!items || items.length === 0) return;
-
   const existing = pendingBatch[table] || [];
   (pendingBatch[table] as unknown[]) = [...existing, ...items];
-
-  // Flush immediately — no batching to avoid data loss
-  flush();
+  // Debounce 500ms so bursts (page load) coalesce.
+  if (batchTimer) clearTimeout(batchTimer);
+  batchTimer = setTimeout(flush, 500);
 }
 
 // ---- API Response Handlers ----
@@ -180,37 +199,14 @@ function handleApiResponse(url: string, data: unknown) {
   }
 }
 
-// ---- Fetch Interception ----
+// ---- Receive API responses from page-hook ----
 
-const originalFetch = window.fetch;
-
-window.fetch = async function pr0VaultFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
-  const response = await originalFetch(input, init);
-
-  try {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof Request
-          ? input.url
-          : input instanceof URL
-            ? input.href
-            : "";
-
-    if (url.includes("/api/")) {
-      const clone = response.clone();
-      const json = await clone.json();
-      handleApiResponse(url, json);
-    }
-  } catch {
-    // Ignore non-JSON or clone failures
-  }
-
-  return response;
-};
+window.addEventListener("message", (ev: MessageEvent) => {
+  if (ev.source !== window) return;
+  const data = ev.data;
+  if (!data || data.source !== HOOK_TAG || typeof data.url !== "string") return;
+  handleApiResponse(data.url, data.data);
+});
 
 // ---- Active Sync Proxy ----
 

@@ -13,6 +13,24 @@ import type {
 } from "./shared/messages";
 import type { VaultStats, Comment, Message, ExportData } from "./shared/types";
 
+// ---- Install / Update Handler ----
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason === "install") {
+    // First install: enable auto-sync by default and trigger initial sync.
+    await chrome.storage.local.set({ autoSync: true });
+    await chrome.alarms.create("pr0vault-sync", { periodInMinutes: 60 });
+    logSync("SW", `Installed v${chrome.runtime.getManifest().version} — auto-sync enabled`);
+  } else if (details.reason === "update") {
+    // Re-arm alarm if user had auto-sync on (alarms persist but ensure correctness).
+    const { autoSync } = await chrome.storage.local.get("autoSync");
+    if (autoSync) {
+      await chrome.alarms.create("pr0vault-sync", { periodInMinutes: 60 });
+    }
+    logSync("SW", `Updated to v${chrome.runtime.getManifest().version}`);
+  }
+});
+
 // ---- Alarm Handler (Auto-Sync) ----
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -126,11 +144,13 @@ async function handleStoreBatch(payload: {
   if (payload.comments?.length) {
     await db.comments.bulkPut(payload.comments);
     await db.meta.put({ key: "lastSync", value: now });
+    invalidateFuseCache();
     logSync("SW", `Stored ${payload.comments.length} comments`);
   }
   if (payload.messages?.length) {
     await db.messages.bulkPut(payload.messages);
     await db.meta.put({ key: "lastSync", value: now });
+    invalidateFuseCache();
     logSync("SW", `Stored ${payload.messages.length} messages`);
   }
   if (payload.filters?.length) {
@@ -166,7 +186,8 @@ async function sendSyncProgress(
   scope: string,
   page: number,
   total: number,
-  newItems: number
+  newItems: number,
+  done = false,
 ) {
   const msg: SyncProgressMessage = {
     type: "SYNC_PROGRESS",
@@ -174,8 +195,8 @@ async function sendSyncProgress(
     page,
     total,
     newItems,
+    done,
   };
-  // Broadcast to popup via runtime
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
@@ -271,6 +292,7 @@ async function syncComments(me: string, fromPopup: boolean) {
     if (newComments.length > 0) {
       await db.comments.bulkPut(newComments);
       await db.meta.put({ key: "lastSync", value: Date.now() });
+      invalidateFuseCache();
       totalNew += newComments.length;
     }
 
@@ -598,6 +620,7 @@ async function syncInbox(_me: string) {
       const synced = filtered.map((m) => ({ ...m, syncedAt: now }));
       await db.messages.bulkPut(synced);
       await db.meta.put({ key: "lastSync", value: now });
+      invalidateFuseCache();
       totalNew += synced.length;
     }
 
@@ -684,24 +707,41 @@ async function handleSyncStart(scope: string): Promise<VaultStats> {
 
 // ---- Search ----
 
-async function handleSearch(query: string, limit: number) {
-  const comments = await db.comments.toArray();
-  const messages = await db.messages.toArray();
+// Cached Fuse instance — rebuilt only after sync writes new comments/messages.
+type SearchableItem = (Comment | Message) & { _type: "comment" | "message" };
+let fuseCache: { fuse: Fuse<SearchableItem>; builtAt: number } | null = null;
+let searchableCount = 0;
 
-  const all: Array<Comment | Message & { _type: string }> = [
-    ...comments.map((c) => ({ ...c, _type: "comment" })),
-    ...messages.map((m) => ({ ...m, _type: "message" })),
+function invalidateFuseCache() {
+  fuseCache = null;
+}
+
+async function buildFuse(): Promise<Fuse<SearchableItem>> {
+  const [comments, messages] = await Promise.all([
+    db.comments.toArray(),
+    db.messages.toArray(),
+  ]);
+  const all: SearchableItem[] = [
+    ...comments.map((c) => ({ ...c, _type: "comment" as const })),
+    ...messages.map((m) => ({ ...m, _type: "message" as const })),
   ];
-
-  const fuse = new Fuse(all, {
+  searchableCount = all.length;
+  return new Fuse(all, {
     keys: ["content", "message"],
     threshold: 0.4,
     minMatchCharLength: 2,
     includeScore: true,
     includeMatches: true,
   });
+}
 
-  const fuseResults = fuse.search(query).slice(0, limit);
+async function handleSearch(query: string, limit: number) {
+  if (!fuseCache) {
+    const fuse = await buildFuse();
+    fuseCache = { fuse, builtAt: Date.now() };
+    logSync("SW", `Fuse index built (${searchableCount} items)`);
+  }
+  const fuseResults = fuseCache.fuse.search(query).slice(0, limit);
   return fuseResults.map((r) => ({ ...r, score: r.score ?? 0 }));
 }
 
