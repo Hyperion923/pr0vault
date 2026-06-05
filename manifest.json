@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "pr0Vault",
+  "version": "0.1.0",
+  "description": "Dein digitales Gedächtnis auf pr0gramm. Auto-Backup, Full-Text-Search, DSGVO-Export.",
+  "permissions": ["storage", "unlimitedStorage", "downloads", "cookies", "alarms"],
+  "host_permissions": [
+    "https://pr0gramm.com/*",
+    "https://img.pr0gramm.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://pr0gramm.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "pr0Vault"
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
