@@ -2,6 +2,7 @@ import { signal, effect } from "@preact/signals";
 import { Dashboard } from "./Dashboard";
 import { Search } from "./Search";
 import { ExportPanel } from "./Export";
+import { CollectionsPanel } from "./Collections";
 import { LogPanel } from "./Log";
 import type { VaultStats } from "../shared/types";
 import type {
@@ -9,7 +10,7 @@ import type {
   SyncCompleteMessage,
 } from "../shared/messages";
 
-const activeTab = signal<"dashboard" | "search" | "export" | "log">("dashboard");
+const activeTab = signal<"dashboard" | "search" | "export" | "collections" | "log">("dashboard");
 const stats = signal<VaultStats>({
   uploads: 0,
   comments: 0,
@@ -107,6 +108,12 @@ export function App() {
           Export
         </button>
         <button
+          class={activeTab.value === "collections" ? "active" : ""}
+          onClick={() => (activeTab.value = "collections")}
+        >
+          Sammlungen
+        </button>
+        <button
           class={activeTab.value === "log" ? "active" : ""}
           onClick={() => (activeTab.value = "log")}
         >
@@ -124,6 +131,7 @@ export function App() {
         )}
         {activeTab.value === "search" && <Search />}
         {activeTab.value === "export" && <ExportPanel />}
+        {activeTab.value === "collections" && <CollectionsPanel />}
         {activeTab.value === "log" && <LogPanel />}
       </main>
     </div>

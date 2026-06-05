@@ -106,55 +106,6 @@
       <p style="margin-top:8px">Permissions: <code>storage</code> (Settings), <code>unlimitedStorage</code> (große Backups), <code>downloads</code> (Export), <code>host:pr0gramm.com</code> (API-Interception), <code>host:img.pr0gramm.com</code> (Thumbnail-Download).</p>
     </div>
 
-    <script>
-      // Load saved setting
-      chrome.storage.local.get("storageScope", (data) => {
-        if (data.storageScope) {
-          const radio = document.querySelector(`input[value="${data.storageScope}"]`);
-          if (radio) radio.checked = true;
-        }
-      });
-
-      // Save on change
-      document.querySelectorAll('input[name="storageScope"]').forEach((el) => {
-        el.addEventListener("change", () => {
-          chrome.storage.local.set({ storageScope: el.value });
-        });
-      });
-
-      // Color theme
-      const DEFAULT_COLOR = "#d23c22";
-      chrome.storage.local.get("accentColor", (data) => {
-        const color = data.accentColor || DEFAULT_COLOR;
-        document.querySelectorAll('.color-swatch').forEach(s => {
-          s.classList.toggle('selected', s.dataset.color === color);
-        });
-      });
-      document.getElementById("colorPicker").addEventListener("click", (e) => {
-        const swatch = e.target.closest('.color-swatch');
-        if (!swatch) return;
-        const color = swatch.dataset.color;
-        chrome.storage.local.set({ accentColor: color });
-        document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('selected'));
-        swatch.classList.add('selected');
-      });
-
-      // Delete all data
-      document.getElementById("deleteBtn").addEventListener("click", () => {
-        if (!confirm("Wirklich ALLE gespeicherten Backup-Daten löschen? Das kann nicht rückgängig gemacht werden.")) return;
-
-        const status = document.getElementById("status");
-        const request = indexedDB.deleteDatabase("pr0Vault");
-        request.onsuccess = () => {
-          chrome.storage.local.clear();
-          status.textContent = "Alle Daten gelöscht.";
-          status.className = "status success";
-        };
-        request.onerror = () => {
-          status.textContent = "Fehler beim Löschen.";
-          status.className = "status error";
-        };
-      });
-    </script>
+    <script type="module" src="./options.ts"></script>
   </body>
 </html>

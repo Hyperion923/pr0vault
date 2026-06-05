@@ -1,7 +1,7 @@
 // pr0Vault — Content Script (injected on pr0gramm.com)
 // Intercepts fetch/XHR API responses and mirrors them to IndexedDB via Service Worker.
 
-import type { Upload, Comment, Message, FilterBookmark } from "./shared/types";
+import type { Upload, Comment, Message, FilterBookmark, Collection, CollectionItem } from "./shared/types";
 import type { StoreBatchMessage } from "./shared/messages";
 import { logSync, logErr } from "./shared/logger";
 
@@ -10,6 +10,8 @@ interface PendingBatch {
   comments?: Comment[];
   messages?: Message[];
   filters?: FilterBookmark[];
+  collections?: Collection[];
+  collectionItems?: CollectionItem[];
 }
 
 let pendingBatch: PendingBatch = {};
@@ -21,9 +23,14 @@ function flush() {
       type: "STORE_BATCH",
       payload: pendingBatch,
     };
+    console.log("[pr0Vault CS] Flushing batch:", Object.keys(pendingBatch).map(k => `${k}:${((pendingBatch as Record<string, unknown[]>)[k]).length}`).join(", "));
     // Send synchronously to ensure data is not lost
     try {
-      chrome.runtime.sendMessage(msg);
+      chrome.runtime.sendMessage(msg, () => {
+        if (chrome.runtime.lastError) {
+          console.error("[pr0Vault CS] sendMessage error:", chrome.runtime.lastError.message);
+        }
+      });
     } catch {
       // silent
     }
@@ -58,6 +65,46 @@ function handleProfileInfo(data: Record<string, unknown>) {
   const comments = data.comments as Comment[] | undefined;
   if (comments && Array.isArray(comments)) {
     enqueue("comments", comments);
+  }
+      // Store collections from profile info (includes preview items)
+      const profileCollections = data.collections as any[] | undefined;
+      if (profileCollections?.length) {
+        console.log(`[pr0Vault CS] Found ${profileCollections.length} collections in profile/info`);
+        const now = Date.now();
+    const cols: Collection[] = [];
+    const citems: CollectionItem[] = [];
+    for (const pc of profileCollections) {
+      cols.push({
+        id: pc.id,
+        name: pc.name ?? "",
+        keyword: pc.keyword ?? "",
+        isPublic: !!pc.isPublic,
+        isDefault: !!pc.isDefault,
+        isCurated: false,
+        syncedAt: now,
+      });
+      if (pc.items?.length) {
+        for (const it of pc.items) {
+          citems.push({
+            collectionId: pc.id,
+            itemId: it.id,
+            userId: 0,
+            user: "",
+            created: 0,
+            image: "",
+            thumb: it.thumb ?? "",
+            flags: it.flags ?? 0,
+            mark: 0,
+            up: 0,
+            down: 0,
+            tags: [],
+            syncedAt: now,
+          });
+        }
+      }
+    }
+    if (cols.length) enqueue("collections", cols);
+    if (citems.length) enqueue("collectionItems", citems);
   }
 }
 
@@ -108,6 +155,21 @@ function handleApiResponse(url: string, data: unknown) {
     }
     if (url.includes("/collections/get")) {
       logSync("CS", `Intercepted /collections/get`);
+      const colData = data as Record<string, unknown>;
+      const allCols = (colData.collections || colData.curatorCollections) as any[] | undefined;
+      if (allCols?.length) {
+        const now = Date.now();
+        const cols: Collection[] = allCols.map((c: any) => ({
+          id: c.id ?? 0,
+          name: c.name ?? "",
+          keyword: c.keyword ?? "",
+          isPublic: !!c.isPublic,
+          isDefault: !!c.isDefault,
+          isCurated: false,
+          syncedAt: now,
+        }));
+        enqueue("collections", cols);
+      }
     }
     if (url.includes("/inbox/")) {
       logSync("CS", `Intercepted inbox: ${url}`);

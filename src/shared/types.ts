@@ -46,12 +46,24 @@ export interface Collection {
   keyword: string;
   isPublic: boolean;
   isDefault: boolean;
+  isCurated: boolean;
   syncedAt: number;
 }
 
-export interface CollectionMembership {
+export interface CollectionItem {
   collectionId: number;
   itemId: number;
+  userId: number;
+  user: string;
+  created: number;
+  image: string;
+  thumb: string;
+  flags: number;
+  mark: number;
+  up: number;
+  down: number;
+  tags: Tag[];
+  thumbBlob?: Blob;
   syncedAt: number;
 }
 
@@ -88,6 +100,6 @@ export interface ExportData {
   uploads: Upload[];
   comments: Comment[];
   filters: FilterBookmark[];
-  collections: { collection: Collection; items: number[] }[];
+  collections: { collection: Collection; items: CollectionItem[] }[];
   messages: Message[];
 }

@@ -1,6 +1,6 @@
 // pr0Vault — Message Protocol
 
-import type { Upload, Comment, FilterBookmark, Message, VaultStats } from "./types";
+import type { Upload, Comment, FilterBookmark, Message, VaultStats, Collection, CollectionItem } from "./types";
 
 // --- Content Script → Service Worker ---
 
@@ -11,6 +11,8 @@ export interface StoreBatchMessage {
     comments?: Comment[];
     filters?: FilterBookmark[];
     messages?: Message[];
+    collections?: Collection[];
+    collectionItems?: CollectionItem[];
   };
 }
 
@@ -35,6 +37,23 @@ export interface ExportMessage {
   type: "EXPORT";
   format: "json" | "zip";
   scope: "all" | "comments" | "uploads";
+}
+
+export interface CacheThumbMessage {
+  type: "CACHE_THUMB";
+  itemId: number;
+  blobBase64: string;
+}
+
+export interface GetCollectionsMessage {
+  type: "GET_COLLECTIONS";
+}
+
+export interface GetCollectionItemsMessage {
+  type: "GET_COLLECTION_ITEMS";
+  collectionId: number;
+  offset?: number;
+  limit?: number;
 }
 
 // --- Service Worker → Popup ---
@@ -68,6 +87,9 @@ export type VaultMessage =
   | QuerySearchMessage
   | GetStatsMessage
   | ExportMessage
+  | CacheThumbMessage
+  | GetCollectionsMessage
+  | GetCollectionItemsMessage
   | SyncProgressMessage
   | SyncCompleteMessage
   | FetchApiMessage;
@@ -78,4 +100,6 @@ export type VaultResponse =
   | { success: boolean; filename?: string }
   | { success: boolean; error?: string }
   | { data: unknown }
+  | { collections: Collection[]; counts: Record<number, number> }
+  | { items: CollectionItem[]; atEnd: boolean }
   | void;

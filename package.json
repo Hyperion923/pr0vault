@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite build --watch",
-    "build": "tsc && vite build",
+    "dev": "vite build --watch & vite build --watch --config vite.content.config.ts",
+    "build": "tsc && vite build && vite build --config vite.content.config.ts",
     "build:icons": "node scripts/build-icons.mjs",
     "prebuild": "pnpm run build:icons",
     "predev": "pnpm run build:icons"
